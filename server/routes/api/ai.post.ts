@@ -14,19 +14,19 @@ export default defineHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'Enter a command of at most 500 characters.' });
   }
 
-  const key = process.env.OPENAI_API_KEY;
+  const key = process.env.OPENROUTER_API_KEY;
   if (!key) {
-    throw createError({ statusCode: 503, statusMessage: 'AI is not configured. Ask the site administrator to set OPENAI_API_KEY. Known GDS commands still work in simulation mode.' });
+    throw createError({ statusCode: 503, statusMessage: 'AI is not configured. Ask the site administrator to set OPENROUTER_API_KEY. Known GDS commands still work in simulation mode.' });
   }
 
   try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        model: process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3.5-lightning:free',
         temperature: 0.2,
-        max_tokens: 450,
+        max_tokens: 900,
         messages: [
           {
             role: 'system',
@@ -42,12 +42,12 @@ export default defineHandler(async (event) => {
 
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
-        throw createError({ statusCode: 502, statusMessage: 'The server OpenAI API key is invalid or unauthorized. Contact the site administrator.' });
+        throw createError({ statusCode: 502, statusMessage: 'The server OpenRouter API key is invalid or unauthorized. Contact the site administrator.' });
       }
       if (response.status === 429) {
-        throw createError({ statusCode: 429, statusMessage: 'AI rate limit reached. Please wait and try again.' });
+        throw createError({ statusCode: 429, statusMessage: 'OpenRouter rate limit reached. Please wait and try again.' });
       }
-      throw createError({ statusCode: 502, statusMessage: 'AI service is temporarily unavailable. Try again shortly.' });
+      throw createError({ statusCode: 502, statusMessage: 'OpenRouter is temporarily unavailable or the selected Nemotron model is unavailable. Check the configured model and try again.' });
     }
 
     const data = await response.json() as { choices?: { message?: { content?: string } }[] };
