@@ -1,4 +1,4 @@
-import { PnrState, SimulatorSession } from '../types/gds';
+import { FlightAvailabilityOption, PnrState, SimulatorSession } from './gds';
 
 export const AIRPORTS: Record<string, { city: string; country: string; name: string }> = {
   DEL: { city: 'DELHI', country: 'INDIA', name: 'Indira Gandhi Intl' },

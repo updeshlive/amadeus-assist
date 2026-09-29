@@ -1,7 +1,9 @@
 import {
   FlightAvailabilityOption,
+  PnrPassenger,
   PnrSegment,
   PnrState,
+  TerminalEntry,
 } from '../types/gds';
 import {
   AIRPORTS,
@@ -105,9 +107,13 @@ export function generateMockAvailability(
     },
   ];
 
-  const filtered = airlineFilter
-    ? flightTemplates.filter((f) => f.airline.toUpperCase() === airlineFilter.toUpperCase())
-    : flightTemplates;
+  let filtered = flightTemplates;
+  if (airlineFilter) {
+    const matched = flightTemplates.filter(
+      (f) => f.airline.toUpperCase() === airlineFilter.toUpperCase()
+    );
+    if (matched.length > 0) filtered = matched;
+  }
 
   return filtered.slice(0, 5).map((t, idx) => {
     const classTokens = t.classes.split(' ').map((tok) => ({
@@ -122,8 +128,8 @@ export function generateMockAvailability(
       classes: classTokens,
       origin: originCode,
       destination: destCode,
-      depTime: t.dep,
-      arrTime: t.arr,
+      depTime: t.depTime,
+      arrTime: t.arrTime,
       aircraft: t.craft,
       duration: t.dur,
       dateStr: formattedDate,
@@ -282,8 +288,7 @@ export function formatFareQuote(pnr: PnrState, storeTst: boolean): string {
 export function executeGdsCommand(
   rawCmd: string,
   currentPnr: PnrState,
-  lastAvailability: FlightAvailabilityOption[],
-  savedPnr?: PnrState
+  lastAvailability: FlightAvailabilityOption[]
 ): CommandExecutionResult {
   const cmd = rawCmd.trim().toUpperCase();
   const pnr = JSON.parse(JSON.stringify(currentPnr)) as PnrState;
@@ -355,16 +360,11 @@ INFO & CONVERSIONS:
 
   // 2. AVAILABILITY (AN, AD, SN)
   // Format: AN<DATE><ORIGIN><DEST>[/AIRLINE] e.g. AN15AUGDELBOM or AN15AUGDELBOM/AI
-  const anMatch = cmd.match(/^(?:AN|AD|SN)(\d{1,2}[A-Z]{3})([A-Z]{3})([A-Z]{3})(?:\/([A-Z0-9]{2}))?$/);
+  const anMatch = cmd.match(/^A[ND](\d{1,2}[A-Z]{3})([A-Z]{3})([A-Z]{3})(?:\/([A-Z0-9]{2}))?$/);
   if (anMatch) {
     const [, dateStr, origin, dest, airlineFilter] = anMatch;
-    const month = dateStr.slice(-3);
-    const day = Number(dateStr.slice(0, -3));
-    if (!'JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC'.split(' ').includes(month) || day < 1 || day > 31 || origin === dest || !AIRPORTS[origin] || !AIRPORTS[dest]) {
-      return { output: 'INVALID DATE OR CITY PAIR', updatedPnr: pnr, status: 'error', category: 'AVAILABILITY' };
-    }
     const flights = generateMockAvailability(dateStr, origin, dest, airlineFilter);
-    const screen = flights.length ? formatAvailabilityScreen(dateStr, origin, dest, flights) : `NO FLIGHTS FOUND FOR CARRIER ${airlineFilter} - SIMULATED DATA`;
+    const screen = formatAvailabilityScreen(dateStr, origin, dest, flights);
     return {
       output: screen,
       updatedPnr: pnr,
@@ -376,7 +376,7 @@ INFO & CONVERSIONS:
   }
 
   // Alternate AN format without date (defaults to today + 7 days)
-  const anNoDateMatch = cmd.match(/^(?:AN|AD|SN)([A-Z]{3})([A-Z]{3})$/);
+  const anNoDateMatch = cmd.match(/^A[ND]([A-Z]{3})([A-Z]{3})$/);
   if (anNoDateMatch) {
     const [, origin, dest] = anNoDateMatch;
     const today = new Date();
@@ -422,15 +422,14 @@ INFO & CONVERSIONS:
     }
 
     const classFound = flightOpt.classes.find((c) => c.code === bookingClass);
-    if (!classFound || seats < 1 || seats > Number(classFound.seats)) {
+    if (!classFound) {
       return {
-        output: `SEGMENT NOT AVAILABLE - ${seats} SEAT(S) IN CLASS ${bookingClass} ON LINE ${lineNum}`,
+        output: `CLASS ${bookingClass} NOT AVAILABLE ON LINE ${lineNum}`,
         updatedPnr: pnr,
         status: 'error',
         category: 'SELL',
       };
     }
-    if (pnr.ticket.issued) return { output: 'TICKETED PNR - CANNOT MODIFY ITINERARY', updatedPnr: pnr, status: 'error', category: 'SELL' };
 
     const newSegment: PnrSegment = {
       id: 'seg_' + Math.random().toString(36).substring(2, 7),
@@ -488,12 +487,62 @@ INFO & CONVERSIONS:
 
     const expectedCount = parseInt(countMatch[1], 10);
     const namesPart = countMatch[2];
-    const matches = [...namesPart.matchAll(/\/?([A-Z][A-Z'-]*)\/([A-Z][A-Z '-]*?)\s+(MR|MS|MRS|MISS|MSTR|DR)(?=\/|$)/g)];
-    const parsedPassengers = matches.map((match) => ({ lastName: match[1], firstName: match[2].trim(), title: match[3] }));
-    const consumed = matches.map((match) => match[0]).join('');
-    if (expectedCount < 1 || parsedPassengers.length !== expectedCount || consumed !== namesPart) {
+    const paxTokens = namesPart.split('/').filter(Boolean);
+
+    // If format is NM1SMITH/JOHN MR -> tokens will be [SMITH, JOHN MR]
+    // If multi: NM2YADAV/SIMS MS/YADAV/RAHUL MR
+    const parsedPassengers: { lastName: string; firstName: string; title: string }[] = [];
+
+    if (expectedCount === 1) {
+      const slashIdx = namesPart.indexOf('/');
+      if (slashIdx === -1) {
+        return {
+          output: 'INVALID NAME FORMAT. MUST CONTAIN LASTNAME/FIRSTNAME TITLE',
+          updatedPnr: pnr,
+          status: 'error',
+          category: 'NAME',
+        };
+      }
+      const lastName = namesPart.substring(0, slashIdx).trim();
+      const rest = namesPart.substring(slashIdx + 1).trim();
+      const spaceIdx = rest.lastIndexOf(' ');
+      let firstName = rest;
+      let title = 'MR';
+      if (spaceIdx !== -1) {
+        firstName = rest.substring(0, spaceIdx).trim();
+        title = rest.substring(spaceIdx + 1).trim();
+      }
+      parsedPassengers.push({ lastName, firstName, title });
+    } else {
+      // General multi-passenger split
+      // Example: YADAV/SIMS MS/YADAV/RAHUL MR
+      const chunks = namesPart.split('/');
+      // Expect pairs of [lastName, firstName+title, lastName, firstName+title]
+      if (chunks.length < 2) {
+        return {
+          output: 'INVALID MULTI-PASSENGER FORMAT',
+          updatedPnr: pnr,
+          status: 'error',
+          category: 'NAME',
+        };
+      }
+      for (let i = 0; i < chunks.length - 1; i += 2) {
+        const lastName = chunks[i].trim();
+        const firstAndTitle = chunks[i + 1].trim();
+        const sp = firstAndTitle.lastIndexOf(' ');
+        let firstName = firstAndTitle;
+        let title = 'MR';
+        if (sp !== -1) {
+          firstName = firstAndTitle.substring(0, sp).trim();
+          title = firstAndTitle.substring(sp + 1).trim();
+        }
+        parsedPassengers.push({ lastName, firstName, title });
+      }
+    }
+
+    if (parsedPassengers.length === 0) {
       return {
-        output: 'INVALID NUMBER OF NAMES OR NAME FORMAT. USE NM1SMITH/JOHN MR',
+        output: 'NAME SYNTAX ERROR. USE NM1LASTNAME/FIRSTNAME TITLE',
         updatedPnr: pnr,
         status: 'error',
         category: 'NAME',
@@ -625,7 +674,7 @@ INFO & CONVERSIONS:
     if (!pnr.recordLocator) {
       pnr.recordLocator = generateRecordLocator();
     }
-    if (!pnr.ticket.issued) pnr.status = 'SAVED';
+    pnr.status = 'SAVED';
     pnr.lastUpdated = new Date().toISOString();
 
     if (cmd === 'ET') {
@@ -662,22 +711,23 @@ INFO & CONVERSIONS:
 
   // 10. IGNORE (IG, IR)
   if (cmd === 'IG') {
+    // Resets unsaved session changes or clears current active PNR
     return {
-      output: savedPnr ? `TRANSACTION IGNORED - PNR ${savedPnr.recordLocator} RESTORED` : 'TRANSACTION IGNORED - AAA WORK AREA CLEARED',
-      updatedPnr: JSON.parse(JSON.stringify(savedPnr || INITIAL_PNR)),
+      output: 'TRANSACTION IGNORED - AAA WORK AREA CLEARED',
+      updatedPnr: JSON.parse(JSON.stringify(INITIAL_PNR)),
       status: 'warning',
       category: 'TRANSACTION',
-      explanation: 'Unsaved changes discarded. Last saved state restored.',
+      explanation: 'Work area cleared. Start fresh with AN command.',
     };
   }
 
   if (cmd === 'IR') {
     return {
-      output: savedPnr ? formatPnrDisplay(savedPnr) : 'IGNORED - NO SAVED PNR IN AAA',
-      updatedPnr: JSON.parse(JSON.stringify(savedPnr || INITIAL_PNR)),
+      output: pnr.recordLocator ? formatPnrDisplay(pnr) : 'IGNORED - NO PNR IN AAA',
+      updatedPnr: pnr,
       status: 'warning',
       category: 'TRANSACTION',
-      explanation: 'Unsaved changes discarded; saved PNR retrieved.',
+      explanation: 'Ignore and retrieve re-displays saved state.',
     };
   }
 
@@ -733,7 +783,6 @@ INFO & CONVERSIONS:
 
   // 12. TICKETING (TTP)
   if (cmd === 'TTP') {
-    if (pnr.ticket.issued) return { output: 'TICKET ALREADY ISSUED - NO DUPLICATE TICKET CREATED', updatedPnr: pnr, status: 'error', category: 'TICKETING' };
     if (!pnr.recordLocator) {
       return {
         output: 'CANNOT ISSUE TICKET - RECORD LOCATOR DOES NOT EXIST (RUN ER FIRST)',
@@ -795,7 +844,6 @@ INFO & CONVERSIONS:
 
   // 13. CANCEL / DELETE (XE, XI)
   if (cmd === 'XI') {
-    if (pnr.ticket.issued) return { output: 'TICKETED PNR - VOID TICKET BEFORE CANCELLING ITINERARY', updatedPnr: pnr, status: 'error', category: 'CANCEL' };
     pnr.segments = [];
     pnr.fare.priced = false;
     pnr.lastUpdated = new Date().toISOString();
@@ -809,9 +857,8 @@ INFO & CONVERSIONS:
   }
 
   if (cmd.startsWith('XE')) {
-    if (pnr.ticket.issued) return { output: 'TICKETED PNR - VOID TICKET BEFORE DELETING ELEMENTS', updatedPnr: pnr, status: 'error', category: 'CANCEL' };
-    const lineNum = /^XE\d+$/.test(cmd) ? Number(cmd.slice(2)) : NaN;
-    if (isNaN(lineNum) || lineNum < 1) {
+    const lineNum = parseInt(cmd.substring(2).trim(), 10);
+    if (isNaN(lineNum)) {
       return {
         output: 'INVALID FORMAT. USE XE1 OR XE2',
         updatedPnr: pnr,
@@ -923,36 +970,12 @@ TIME ZONE: LOCAL AIRPORT TIME`,
     };
   }
 
-  if (cmd.startsWith('DC')) {
-    const match = cmd.match(/^DC\s*(\d+(?:\.\d{1,2})?)(USD|EUR|GBP|INR)\/(USD|EUR|GBP|INR)$/);
-    if (!match) return { output: 'INVALID FORMAT. USE DC 100USD/INR', updatedPnr: pnr, status: 'error', category: 'INFO' };
-    const rates: Record<string, number> = { USD: 83, EUR: 90, GBP: 105, INR: 1 };
-    const result = Number(match[1]) * rates[match[2]] / rates[match[3]];
-    return { output: `${match[1]} ${match[2]} = ${result.toFixed(2)} ${match[3]}\nILLUSTRATIVE RATE ONLY - NOT LIVE FX DATA`, updatedPnr: pnr, status: 'info', category: 'INFO' };
-  }
-
-  if (cmd.startsWith('FQD')) {
-    const match = cmd.match(/^FQD([A-Z]{3})([A-Z]{3})$/);
-    if (!match) return { output: 'INVALID FORMAT. USE FQDDELBOM', updatedPnr: pnr, status: 'error', category: 'PRICING' };
-    return { output: `FARE DISPLAY ${match[1]}-${match[2]}\nYFLEXIN  INR 6500 + TAXES INR 1250\nTOTAL INR 7750 PER ADULT\nSIMULATED FARES - NOT LIVE PRICES`, updatedPnr: pnr, status: 'info', category: 'PRICING' };
-  }
-  if (cmd.startsWith('FQN')) {
-    return { output: 'SIMULATED FARE RULES - YFLEXIN\nCHANGES: INR 2500 BEFORE DEPARTURE\nREFUND: INR 3500 PENALTY BEFORE DEPARTURE\nBAGGAGE: 1PC / 15KG\nILLUSTRATIVE RULES ONLY - NOT LIVE AIRLINE POLICY', updatedPnr: pnr, status: 'info', category: 'PRICING' };
-  }
-  if (cmd === 'TRDC') {
-    if (!pnr.ticket.issued) return { output: 'NO TICKET TO VOID IN PNR', updatedPnr: pnr, status: 'error', category: 'TICKETING' };
-    pnr.ticket = { ...pnr.ticket, issued: false, status: 'VOID' };
-    pnr.status = 'SAVED';
-    return { output: 'SIMULATED TICKET VOIDED - NO REAL TICKET WAS AFFECTED', updatedPnr: pnr, status: 'warning', category: 'TICKETING' };
-  }
-  if (cmd.startsWith('QE')) {
-    if (!pnr.recordLocator) return { output: 'NO SAVED PNR TO PLACE ON QUEUE', updatedPnr: pnr, status: 'error', category: 'QUEUE' };
-    pnr.queueRef = cmd.slice(2).trim() || 'Q1';
-    return { output: `PNR ${pnr.recordLocator} PLACED ON SIMULATED QUEUE ${pnr.queueRef}`, updatedPnr: pnr, status: 'success', category: 'QUEUE' };
-  }
-  if (cmd === 'QS' || cmd === 'QN') return { output: pnr.queueRef ? `SIMULATED QUEUE ${pnr.queueRef} - PNR ${pnr.recordLocator}` : 'SIMULATED QUEUE EMPTY', updatedPnr: pnr, status: 'info', category: 'QUEUE' };
-  if (/^(AN|AD|SN|SS|AP|TK|NM|SR|OS|RM|RC|RI|XE|RF)/.test(cmd)) {
-    return { output: 'INVALID FORMAT - TYPE HELP FOR COMMAND SYNTAX', updatedPnr: pnr, status: 'error', category: 'GENERAL' };
-  }
-  return { output: 'PROCESSING VIA AMADEUS AI ENGINE...', updatedPnr: pnr, status: 'info', category: 'AI_COMMAND', shouldAskAi: true };
+  // 17. Unknown or natural language command -> Delegate to AI engine
+  return {
+    output: `PROCESSING VIA AMADEUS AI ENGINE...`,
+    updatedPnr: pnr,
+    status: 'info',
+    category: 'AI_COMMAND',
+    shouldAskAi: true,
+  };
 }

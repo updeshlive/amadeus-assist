@@ -122,7 +122,6 @@ export interface SimulatorSession {
   createdAt: string;
   updatedAt: string;
   pnr: PnrState;
-  savedPnr?: PnrState;
   terminalHistory: TerminalEntry[];
   lastAvailability: FlightAvailabilityOption[];
   commandQueue: string[];
