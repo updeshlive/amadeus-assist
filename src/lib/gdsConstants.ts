@@ -21,6 +21,9 @@ export const AIRPORTS: Record<string, { city: string; country: string; name: str
 export const AIRLINES: Record<string, { name: string; ticketPrefix: string }> = {
   AI: { name: 'AIR INDIA', ticketPrefix: '098' },
   '6E': { name: 'INDIGO', ticketPrefix: '312' },
+  QP: { name: 'AKASA AIR', ticketPrefix: '110' },
+  IX: { name: 'AIR INDIA EXPRESS', ticketPrefix: '999' },
+  SG: { name: 'SPICEJET', ticketPrefix: '775' },
   UK: { name: 'VISTARA', ticketPrefix: '228' },
   BA: { name: 'BRITISH AIRWAYS', ticketPrefix: '125' },
   EK: { name: 'EMIRATES', ticketPrefix: '176' },

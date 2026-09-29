@@ -17,7 +17,7 @@ export interface CommandExecutionResult {
   shouldAskAi?: boolean;
 }
 
-// Generate deterministic mock availability
+// Simulated inventory is stable for a route and date, but varies between searches.
 export function generateMockAvailability(
   dateStr: string,
   origin: string,
@@ -27,109 +27,78 @@ export function generateMockAvailability(
   const originCode = origin.toUpperCase();
   const destCode = dest.toUpperCase();
   const formattedDate = dateStr.toUpperCase();
+  const route = originCode + destCode;
+  const hash = (value: string) => {
+    let result = 2166136261;
+    for (const char of value) result = Math.imul(result ^ char.charCodeAt(0), 16777619);
+    return result >>> 0;
+  };
+  const clock = (minutes: number) => {
+    const time = minutes % 1440;
+    return String(Math.floor(time / 60)).padStart(2, '0') + String(time % 60).padStart(2, '0') + (minutes >= 1440 ? '+1' : '');
+  };
 
-  const flightTemplates = [
-    {
-      airline: 'AI',
-      number: '865',
-      dep: '0750',
-      arr: '0950',
-      craft: '32N',
-      dur: '2:00',
-      stops: 0,
-      classes: 'J9 C9 D9 I9 Y9 B9 M9 H9 K9',
-    },
-    {
-      airline: '6E',
-      number: '533',
-      dep: '0930',
-      arr: '1140',
-      craft: '320',
-      dur: '2:10',
-      stops: 0,
-      classes: 'J9 C9 D9 I9 Y9 B9 M9 H9 K9',
-    },
-    {
-      airline: 'UK',
-      number: '995',
-      dep: '1215',
-      arr: '1425',
-      craft: '789',
-      dur: '2:10',
-      stops: 0,
-      classes: 'J4 C4 D2 Y9 B9 M9 H9 Q4 V0',
-    },
-    {
-      airline: 'AI',
-      number: '887',
-      dep: '1600',
-      arr: '1810',
-      craft: '77W',
-      dur: '2:10',
-      stops: 0,
-      classes: 'F2 A2 J6 C4 Y9 B9 M9 H9 K9',
-    },
-    {
-      airline: '6E',
-      number: '201',
-      dep: '1945',
-      arr: '2155',
-      craft: '321',
-      dur: '2:10',
-      stops: 0,
-      classes: 'Y9 B9 M9 H9 K9 Q9 L9 V0',
-    },
-    {
-      airline: 'BA',
-      number: '142',
-      dep: '0315',
-      arr: '0830',
-      craft: '777',
-      dur: '9:45',
-      stops: 0,
-      classes: 'F4 J9 C9 W9 Y9 B9 M9',
-    },
-    {
-      airline: 'EK',
-      number: '511',
-      dep: '1030',
-      arr: '1245',
-      craft: '388',
-      dur: '3:45',
-      stops: 0,
-      classes: 'F4 A2 J7 C7 Y9 B9 M9',
-    },
-  ];
+  const isDomestic = AIRPORTS[originCode]?.country === 'INDIA' && AIRPORTS[destCode]?.country === 'INDIA';
+  const pair = [originCode, destCode];
+  let carriers: string[];
+  let baseDuration: number;
 
-  let filtered = flightTemplates;
-  if (airlineFilter) {
-    const matched = flightTemplates.filter(
-      (f) => f.airline.toUpperCase() === airlineFilter.toUpperCase()
-    );
-    filtered = matched;
+  if (isDomestic) {
+    carriers = ['AI', '6E', 'QP', '6E', 'IX', 'AI', 'SG'];
+    baseDuration = 95 + hash(route) % 65;
+  } else if (pair.includes('DXB')) {
+    carriers = ['AI', 'EK', '6E', 'IX', 'EK', 'AI', '6E'];
+    baseDuration = 185 + hash(route) % 85;
+  } else if (pair.includes('DOH')) {
+    carriers = ['AI', 'QR', '6E', 'QR', 'AI', 'QR', '6E'];
+    baseDuration = 210 + hash(route) % 85;
+  } else if (pair.includes('LHR')) {
+    carriers = ['AI', 'BA', 'AI', 'BA', 'AI', 'BA', 'AI'];
+    baseDuration = 520 + hash(route) % 110;
+  } else if (pair.includes('CDG') || pair.includes('FRA')) {
+    carriers = pair.includes('CDG') ? ['AI', 'AF', 'AI', 'AF', 'AI', 'AF', 'AI'] : ['AI', 'LH', 'AI', 'LH', 'AI', 'LH', 'AI'];
+    baseDuration = 490 + hash(route) % 110;
+  } else if (pair.includes('JFK')) {
+    carriers = ['AI', 'AA', 'AI', 'AA', 'AI', 'AA', 'AI'];
+    baseDuration = 790 + hash(route) % 105;
+  } else if (pair.includes('SIN')) {
+    carriers = ['AI', 'SQ', '6E', 'SQ', 'AI', '6E', 'SQ'];
+    baseDuration = 300 + hash(route) % 75;
+  } else {
+    carriers = ['AI', '6E', 'AI', '6E', 'AI', '6E', 'AI'];
+    baseDuration = 200 + hash(route) % 140;
   }
 
-  return filtered.slice(0, 5).map((t, idx) => {
-    const classTokens = t.classes.split(' ').map((tok) => ({
-      code: tok.charAt(0),
-      seats: tok.substring(1),
+  const seed = hash(formattedDate + route);
+  const flights = Array.from({ length: 6 }, (_, index) => {
+    const airline = carriers[(index + seed % carriers.length) % carriers.length];
+    const variation = hash(route + formattedDate + airline + index);
+    const dep = 290 + index * 160 + variation % 70;
+    const durationMinutes = baseDuration + (variation >>> 8) % 35;
+    const bookingClasses = ['J', 'C', 'D', 'Y', 'B', 'M', 'H', 'K'].map((code, classIndex) => ({
+      code,
+      seats: String(3 + (hash(route + formattedDate + airline + index + code + classIndex) % 7)),
     }));
+
     return {
-      line: idx + 1,
-      airlineCode: t.airline,
-      airlineName: AIRLINES[t.airline]?.name || t.airline,
-      flightNumber: t.number,
-      classes: classTokens,
+      line: index + 1,
+      airlineCode: airline,
+      airlineName: AIRLINES[airline].name,
+      flightNumber: String(101 + hash(route + formattedDate + airline + index) % 850),
+      classes: bookingClasses,
       origin: originCode,
       destination: destCode,
-      depTime: t.dep,
-      arrTime: t.arr,
-      aircraft: t.craft,
-      duration: t.dur,
+      depTime: clock(dep),
+      arrTime: clock(dep + durationMinutes),
+      aircraft: baseDuration >= 480 ? ['788', '77W', '789'][variation % 3] : ['32N', '320', '738'][variation % 3],
+      duration: Math.floor(durationMinutes / 60) + ':' + String(durationMinutes % 60).padStart(2, '0'),
       dateStr: formattedDate,
-      stops: t.stops,
+      stops: 0,
     };
   });
+
+  return flights.filter(flight => !airlineFilter || flight.airlineCode === airlineFilter.toUpperCase())
+    .map((flight, index) => ({ ...flight, line: index + 1 }));
 }
 
 // Format availability screen in true Amadeus monospace style
@@ -363,9 +332,11 @@ INFO & CONVERSIONS:
       output: screen,
       updatedPnr: pnr,
       updatedAvailability: flights,
-      status: 'success',
+      status: flights.length ? 'success' : 'warning',
       category: 'AVAILABILITY',
-      explanation: `Availability retrieved for ${origin} to ${dest} on ${dateStr}${airlineFilter ? ` via ${airlineFilter}` : ''}. Use SS to sell seats (e.g., SS1Y1).`,
+      explanation: flights.length
+        ? `Availability retrieved for ${origin} to ${dest} on ${dateStr}${airlineFilter ? ` via ${airlineFilter}` : ''}. Use SS to sell seats (e.g., SS1Y1).`
+        : 'No simulated flights match this airline filter. Try another carrier or search without a filter.',
     };
   }
 
