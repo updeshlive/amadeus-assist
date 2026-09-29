@@ -1,10 +1,4 @@
-import {
-  FlightAvailabilityOption,
-  PnrPassenger,
-  PnrSegment,
-  PnrState,
-  TerminalEntry,
-} from '../types/gds';
+import { FlightAvailabilityOption, PnrSegment, PnrState } from '../types/gds';
 import {
   AIRPORTS,
   AIRLINES,
@@ -112,7 +106,7 @@ export function generateMockAvailability(
     const matched = flightTemplates.filter(
       (f) => f.airline.toUpperCase() === airlineFilter.toUpperCase()
     );
-    if (matched.length > 0) filtered = matched;
+    filtered = matched;
   }
 
   return filtered.slice(0, 5).map((t, idx) => {
@@ -128,8 +122,8 @@ export function generateMockAvailability(
       classes: classTokens,
       origin: originCode,
       destination: destCode,
-      depTime: t.depTime,
-      arrTime: t.arrTime,
+      depTime: t.dep,
+      arrTime: t.arr,
       aircraft: t.craft,
       duration: t.dur,
       dateStr: formattedDate,
@@ -360,11 +354,11 @@ INFO & CONVERSIONS:
 
   // 2. AVAILABILITY (AN, AD, SN)
   // Format: AN<DATE><ORIGIN><DEST>[/AIRLINE] e.g. AN15AUGDELBOM or AN15AUGDELBOM/AI
-  const anMatch = cmd.match(/^A[ND](\d{1,2}[A-Z]{3})([A-Z]{3})([A-Z]{3})(?:\/([A-Z0-9]{2}))?$/);
+  const anMatch = cmd.match(/^(?:A[ND]|SN)(\d{1,2}[A-Z]{3})([A-Z]{3})([A-Z]{3})(?:\/([A-Z0-9]{2}))?$/);
   if (anMatch) {
     const [, dateStr, origin, dest, airlineFilter] = anMatch;
     const flights = generateMockAvailability(dateStr, origin, dest, airlineFilter);
-    const screen = formatAvailabilityScreen(dateStr, origin, dest, flights);
+    const screen = flights.length ? formatAvailabilityScreen(dateStr, origin, dest, flights) : `NO FLIGHTS FOUND FOR CARRIER ${airlineFilter} - SIMULATED DATA`;
     return {
       output: screen,
       updatedPnr: pnr,
@@ -376,7 +370,7 @@ INFO & CONVERSIONS:
   }
 
   // Alternate AN format without date (defaults to today + 7 days)
-  const anNoDateMatch = cmd.match(/^A[ND]([A-Z]{3})([A-Z]{3})$/);
+  const anNoDateMatch = cmd.match(/^(?:A[ND]|SN)([A-Z]{3})([A-Z]{3})$/);
   if (anNoDateMatch) {
     const [, origin, dest] = anNoDateMatch;
     const today = new Date();
@@ -422,9 +416,9 @@ INFO & CONVERSIONS:
     }
 
     const classFound = flightOpt.classes.find((c) => c.code === bookingClass);
-    if (!classFound) {
+    if (!classFound || seats < 1 || seats > 9 || Number(classFound.seats) < seats) {
       return {
-        output: `CLASS ${bookingClass} NOT AVAILABLE ON LINE ${lineNum}`,
+        output: `SEGMENT NOT AVAILABLE - CLASS ${bookingClass} HAS INSUFFICIENT SEATS ON LINE ${lineNum}`,
         updatedPnr: pnr,
         status: 'error',
         category: 'SELL',
@@ -487,7 +481,6 @@ INFO & CONVERSIONS:
 
     const expectedCount = parseInt(countMatch[1], 10);
     const namesPart = countMatch[2];
-    const paxTokens = namesPart.split('/').filter(Boolean);
 
     // If format is NM1SMITH/JOHN MR -> tokens will be [SMITH, JOHN MR]
     // If multi: NM2YADAV/SIMS MS/YADAV/RAHUL MR
@@ -540,9 +533,9 @@ INFO & CONVERSIONS:
       }
     }
 
-    if (parsedPassengers.length === 0) {
+    if (parsedPassengers.length !== expectedCount || parsedPassengers.some(p => !/^[A-Z][A-Z -]*$/.test(p.lastName) || !/^[A-Z][A-Z -]*$/.test(p.firstName) || !/^(MR|MRS|MS|MISS|MSTR|DR)$/.test(p.title))) {
       return {
-        output: 'NAME SYNTAX ERROR. USE NM1LASTNAME/FIRSTNAME TITLE',
+        output: 'INVALID NUMBER OF NAMES OR NAME FORMAT. USE NM1LASTNAME/FIRSTNAME MR',
         updatedPnr: pnr,
         status: 'error',
         category: 'NAME',
@@ -589,7 +582,8 @@ INFO & CONVERSIONS:
 
     const tokens = content.split(' ');
     const city = tokens[0].length === 3 ? tokens[0] : 'DEL';
-    const contactVal = tokens.slice(tokens[0].length === 3 ? 1 : 0).join(' ') || content;
+    const contactVal = tokens.slice(tokens[0].length === 3 ? 1 : 0).join(' ');
+    if (!contactVal || (isEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactVal))) return { output: 'INVALID CONTACT FORMAT', updatedPnr: pnr, status: 'error', category: 'CONTACT' };
 
     pnr.contacts.push({
       id: 'cnt_' + Math.random().toString(36).substring(2, 7),
@@ -611,7 +605,7 @@ INFO & CONVERSIONS:
   // 6. TICKETING ARRANGEMENT (TK)
   if (cmd.startsWith('TK')) {
     const arrangement = cmd.substring(2).trim();
-    if (!arrangement) {
+    if (!/^(OK|TL\d{1,2}[A-Z]{3})$/.test(arrangement)) {
       return {
         output: 'INVALID FORMAT. USE TKTL15AUG OR TKOK',
         updatedPnr: pnr,
@@ -711,10 +705,10 @@ INFO & CONVERSIONS:
 
   // 10. IGNORE (IG, IR)
   if (cmd === 'IG') {
-    // Resets unsaved session changes or clears current active PNR
+    // Saved records remain accessible when the work area is ignored.
     return {
-      output: 'TRANSACTION IGNORED - AAA WORK AREA CLEARED',
-      updatedPnr: JSON.parse(JSON.stringify(INITIAL_PNR)),
+      output: pnr.recordLocator ? 'TRANSACTION IGNORED - SAVED PNR RETAINED IN AAA' : 'TRANSACTION IGNORED - AAA WORK AREA CLEARED',
+      updatedPnr: pnr.recordLocator ? pnr : JSON.parse(JSON.stringify(INITIAL_PNR)),
       status: 'warning',
       category: 'TRANSACTION',
       explanation: 'Work area cleared. Start fresh with AN command.',
@@ -783,6 +777,7 @@ INFO & CONVERSIONS:
 
   // 12. TICKETING (TTP)
   if (cmd === 'TTP') {
+    if (pnr.ticket.issued) return { output: 'TICKET ALREADY ISSUED - NO DUPLICATE TICKET CREATED', updatedPnr: pnr, status: 'error', category: 'TICKETING' };
     if (!pnr.recordLocator) {
       return {
         output: 'CANNOT ISSUE TICKET - RECORD LOCATOR DOES NOT EXIST (RUN ER FIRST)',
@@ -844,6 +839,7 @@ INFO & CONVERSIONS:
 
   // 13. CANCEL / DELETE (XE, XI)
   if (cmd === 'XI') {
+    if (pnr.ticket.issued) return { output: 'TICKETED PNR - VOID TICKETS WITH TRDC BEFORE CANCELLATION', updatedPnr: pnr, status: 'error', category: 'CANCEL' };
     pnr.segments = [];
     pnr.fare.priced = false;
     pnr.lastUpdated = new Date().toISOString();
@@ -866,6 +862,7 @@ INFO & CONVERSIONS:
         category: 'CANCEL',
       };
     }
+    if (pnr.ticket.issued) return { output: 'TICKETED PNR - VOID TICKETS WITH TRDC BEFORE DELETION', updatedPnr: pnr, status: 'error', category: 'CANCEL' };
     // Match line number against segments or passengers
     if (lineNum <= pnr.passengers.length && pnr.passengers.length > 0) {
       const removed = pnr.passengers.splice(lineNum - 1, 1);
@@ -899,6 +896,7 @@ INFO & CONVERSIONS:
   // 14. SSR (SR) & OSI (OS)
   if (cmd.startsWith('SR')) {
     const details = cmd.substring(2).trim();
+    if (!/^[A-Z0-9]{4}(?: .*)?$/.test(details)) return { output: 'INVALID SSR FORMAT. USE SR VGML OR SR WCHR', updatedPnr: pnr, status: 'error', category: 'SSR' };
     pnr.ssrs.push({
       id: 'ssr_' + Math.random().toString(36).substring(2, 7),
       code: details.substring(0, 4),
@@ -915,6 +913,7 @@ INFO & CONVERSIONS:
 
   if (cmd.startsWith('OS')) {
     const osiText = cmd.substring(2).trim();
+    if (!/^[A-Z0-9]{2} .+/.test(osiText)) return { output: 'INVALID OSI FORMAT. USE OS YY TEXT', updatedPnr: pnr, status: 'error', category: 'OSI' };
     pnr.osis.push({
       id: 'osi_' + Math.random().toString(36).substring(2, 7),
       airline: osiText.substring(0, 2),
@@ -932,6 +931,7 @@ INFO & CONVERSIONS:
   if (cmd.startsWith('RM') || cmd.startsWith('RC') || cmd.startsWith('RI')) {
     const type = cmd.substring(0, 2) as 'RM' | 'RC' | 'RI';
     const text = cmd.substring(2).trim();
+    if (!text) return { output: 'INVALID REMARK FORMAT', updatedPnr: pnr, status: 'error', category: 'REMARK' };
     pnr.remarks.push({
       id: 'rm_' + Math.random().toString(36).substring(2, 7),
       type,
@@ -968,6 +968,32 @@ TIME ZONE: LOCAL AIRPORT TIME`,
       category: 'INFO',
       shouldAskAi: true,
     };
+  }
+
+  // Fare rules, informational fare displays, queue functions and currency conversion
+  if (cmd.startsWith('FQD')) {
+    const route = cmd.substring(3).trim();
+    if (!/^[A-Z]{6}$/.test(route)) return { output: 'INVALID FARE DISPLAY FORMAT. USE FQDDELBOM', updatedPnr: pnr, status: 'error', category: 'PRICING' };
+    return { output: `FARE DISPLAY ${route.slice(0,3)}-${route.slice(3)}
+YFLEXIN INR 6500 + TAXES
+SIMULATED FARE DISPLAY - NOT LIVE PRICING`, updatedPnr: pnr, status: 'info', category: 'PRICING' };
+  }
+  if (cmd.startsWith('FQN')) return { output: 'FARE RULES - SIMULATED\nCHANGES: INR 2500 + FARE DIFFERENCE\nCANCELLATIONS: INR 3500 BEFORE DEPARTURE\nNO SHOW: NOT PERMITTED\nSIMULATED FARE RULES - NOT VALID FOR TRAVEL', updatedPnr: pnr, status: 'info', category: 'PRICING' };
+  if (cmd === 'TRDC') {
+    if (!pnr.ticket.issued) return { output: 'NO TICKET TO VOID', updatedPnr: pnr, status: 'error', category: 'TICKETING' };
+    pnr.ticket.status = 'VOID'; pnr.ticket.issued = false; pnr.status = 'SAVED';
+    return { output: 'SIMULATED TICKET VOID COMPLETE - NO REAL TICKETS AFFECTED', updatedPnr: pnr, status: 'warning', category: 'TICKETING' };
+  }
+  if (/^Q[ESN]/.test(cmd)) return { output: `SIMULATED QUEUE OPERATION ${cmd.slice(0,2)} - NO LIVE QUEUE MESSAGES`, updatedPnr: pnr, status: 'info', category: 'QUEUE' };
+  const currencyMatch = cmd.match(/^DC(\d+(?:\.\d{1,2})?)(USD|EUR|GBP|INR)\/(USD|EUR|GBP|INR)$/);
+  if (currencyMatch) {
+    const rates: Record<string, number> = { USD: 83, EUR: 90, GBP: 105, INR: 1 };
+    const amount = Number(currencyMatch[1]);
+    return { output: `${amount.toFixed(2)} ${currencyMatch[2]} = ${(amount * rates[currencyMatch[2]] / rates[currencyMatch[3]]).toFixed(2)} ${currencyMatch[3]}
+INDICATIVE SIMULATED RATE ONLY`, updatedPnr: pnr, status: 'info', category: 'INFO' };
+  }
+  if (/^(AN|AD|SN|SS|NM|AP|TK|RF|FXP|FXX|FQD|FQN|TTP|XE|SR|OS|RM|RC|RI|DD|DC|QE|QS|QN)/.test(cmd)) {
+    return { output: 'INVALID FORMAT - TYPE HELP FOR COMMAND SYNTAX', updatedPnr: pnr, status: 'error', category: 'FORMAT', explanation: 'Check the command syntax and try a valid example from the training guide.' };
   }
 
   // 17. Unknown or natural language command -> Delegate to AI engine

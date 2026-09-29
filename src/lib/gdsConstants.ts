@@ -1,4 +1,4 @@
-import { FlightAvailabilityOption, PnrState, SimulatorSession } from './gds';
+import { PnrState, SimulatorSession } from '../types/gds';
 
 export const AIRPORTS: Record<string, { city: string; country: string; name: string }> = {
   DEL: { city: 'DELHI', country: 'INDIA', name: 'Indira Gandhi Intl' },
@@ -94,7 +94,8 @@ ALL FLIGHT DATA, FARES, PNRS, AND TICKETS ARE SIMULATED.
 TERMINAL SIGN-IN OK: 1234AA/SU DEL1A0987 - AAA ACTIVE.
 
 Type HELP or select a training module on the right.
-Quick start: AN15AUGDELBOM -> SS1Y1 -> NM1SMITH/JOHN MR -> AP -> TKTL -> RF -> ER`,
+Quick start: AN15AUGDELBOM -> SS1Y1 -> NM1SMITH/JOHN MR
+             -> AP DEL 9876543210 -> TKTL15AUG -> RF JOHN -> FXP -> ER -> TTP`,
         isAiGenerated: false,
         status: 'info',
         category: 'SYSTEM',
