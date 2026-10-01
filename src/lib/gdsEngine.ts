@@ -1,4 +1,5 @@
 import { FlightAvailabilityOption, PnrSegment, PnrState } from '../types/gds';
+import { AIRPORT_PROFILES, SIMULATED_CARRIERS, ECONOMY_ONLY_CARRIERS } from './airportProfiles';
 import {
   AIRPORTS,
   AIRLINES,
@@ -34,40 +35,23 @@ export function generateMockAvailability(
     return result >>> 0;
   };
   const clock = (minutes: number) => {
-    const time = minutes % 1440;
-    return String(Math.floor(time / 60)).padStart(2, '0') + String(time % 60).padStart(2, '0') + (minutes >= 1440 ? '+1' : '');
+    const day = Math.floor(minutes / 1440);
+    const time = ((minutes % 1440) + 1440) % 1440;
+    return String(Math.floor(time / 60)).padStart(2, '0') + String(time % 60).padStart(2, '0') + (day === 0 ? '' : day > 0 ? '+' + day : String(day));
   };
 
-  const isDomestic = AIRPORTS[originCode]?.country === 'INDIA' && AIRPORTS[destCode]?.country === 'INDIA';
-  const pair = [originCode, destCode];
-  let carriers: string[];
-  let baseDuration: number;
+  const departureAirport = AIRPORT_PROFILES[originCode];
+  const arrivalAirport = AIRPORT_PROFILES[destCode];
+  if (!departureAirport || !arrivalAirport || originCode === destCode) return [];
 
-  if (isDomestic) {
-    carriers = ['AI', '6E', 'QP', '6E', 'IX', 'AI', 'SG'];
-    baseDuration = 95 + hash(route) % 65;
-  } else if (pair.includes('DXB')) {
-    carriers = ['AI', 'EK', '6E', 'IX', 'EK', 'AI', '6E'];
-    baseDuration = 185 + hash(route) % 85;
-  } else if (pair.includes('DOH')) {
-    carriers = ['AI', 'QR', '6E', 'QR', 'AI', 'QR', '6E'];
-    baseDuration = 210 + hash(route) % 85;
-  } else if (pair.includes('LHR')) {
-    carriers = ['AI', 'BA', 'AI', 'BA', 'AI', 'BA', 'AI'];
-    baseDuration = 520 + hash(route) % 110;
-  } else if (pair.includes('CDG') || pair.includes('FRA')) {
-    carriers = pair.includes('CDG') ? ['AI', 'AF', 'AI', 'AF', 'AI', 'AF', 'AI'] : ['AI', 'LH', 'AI', 'LH', 'AI', 'LH', 'AI'];
-    baseDuration = 490 + hash(route) % 110;
-  } else if (pair.includes('JFK')) {
-    carriers = ['AI', 'AA', 'AI', 'AA', 'AI', 'AA', 'AI'];
-    baseDuration = 790 + hash(route) % 105;
-  } else if (pair.includes('SIN')) {
-    carriers = ['AI', 'SQ', '6E', 'SQ', 'AI', '6E', 'SQ'];
-    baseDuration = 300 + hash(route) % 75;
-  } else {
-    carriers = ['AI', '6E', 'AI', '6E', 'AI', '6E', 'AI'];
-    baseDuration = 200 + hash(route) % 140;
-  }
+  const carriers = [...new Set([...departureAirport.carriers, ...arrivalAirport.carriers])];
+  const radians = Math.PI / 180;
+  const latDifference = (arrivalAirport.latitude - departureAirport.latitude) * radians;
+  const lonDifference = (arrivalAirport.longitude - departureAirport.longitude) * radians;
+  const arc = Math.sin(latDifference / 2) ** 2 + Math.cos(departureAirport.latitude * radians) * Math.cos(arrivalAirport.latitude * radians) * Math.sin(lonDifference / 2) ** 2;
+  const distanceKm = 12742 * Math.asin(Math.sqrt(Math.min(1, arc)));
+  const baseDuration = Math.max(45, Math.round(distanceKm / 780 * 60 + 35));
+  const timeZoneDifference = arrivalAirport.utcOffset - departureAirport.utcOffset;
 
   const seed = hash(formattedDate + route);
   const flights = Array.from({ length: 6 }, (_, index) => {
@@ -75,7 +59,8 @@ export function generateMockAvailability(
     const variation = hash(route + formattedDate + airline + index);
     const dep = 290 + index * 160 + variation % 70;
     const durationMinutes = baseDuration + (variation >>> 8) % 35;
-    const bookingClasses = ['J', 'C', 'D', 'Y', 'B', 'M', 'H', 'K'].map((code, classIndex) => ({
+    const classCodes = ECONOMY_ONLY_CARRIERS.has(airline) ? ['Y', 'B', 'M', 'H', 'K', 'Q', 'L', 'V'] : ['J', 'C', 'D', 'Y', 'B', 'M', 'H', 'K'];
+    const bookingClasses = classCodes.map((code, classIndex) => ({
       code,
       seats: String(3 + (hash(route + formattedDate + airline + index + code + classIndex) % 7)),
     }));
@@ -83,13 +68,13 @@ export function generateMockAvailability(
     return {
       line: index + 1,
       airlineCode: airline,
-      airlineName: AIRLINES[airline].name,
+      airlineName: AIRLINES[airline]?.name || SIMULATED_CARRIERS[airline] || airline,
       flightNumber: String(101 + hash(route + formattedDate + airline + index) % 850),
       classes: bookingClasses,
       origin: originCode,
       destination: destCode,
       depTime: clock(dep),
-      arrTime: clock(dep + durationMinutes),
+      arrTime: clock(dep + durationMinutes + timeZoneDifference),
       aircraft: baseDuration >= 480 ? ['788', '77W', '789'][variation % 3] : ['32N', '320', '738'][variation % 3],
       duration: Math.floor(durationMinutes / 60) + ':' + String(durationMinutes % 60).padStart(2, '0'),
       dateStr: formattedDate,
@@ -326,8 +311,14 @@ INFO & CONVERSIONS:
   const anMatch = cmd.match(/^(?:A[ND]|SN)(\d{1,2}[A-Z]{3})([A-Z]{3})([A-Z]{3})(?:\/([A-Z0-9]{2}))?$/);
   if (anMatch) {
     const [, dateStr, origin, dest, airlineFilter] = anMatch;
+    if (!AIRPORT_PROFILES[origin] || !AIRPORT_PROFILES[dest] || origin === dest) {
+      return {
+        output: origin === dest ? 'INVALID ROUTE - ORIGIN AND DESTINATION MUST DIFFER' : `AIRPORT NOT SUPPORTED: ${[origin, dest].filter(code => !AIRPORT_PROFILES[code]).join(', ')}\nSUPPORTED SIMULATION AIRPORTS: ${Object.keys(AIRPORT_PROFILES).join(' ')}`,
+        updatedPnr: pnr, updatedAvailability: [], status: 'error', category: 'AVAILABILITY',
+      };
+    }
     const flights = generateMockAvailability(dateStr, origin, dest, airlineFilter);
-    const screen = flights.length ? formatAvailabilityScreen(dateStr, origin, dest, flights) : `NO FLIGHTS FOUND FOR CARRIER ${airlineFilter} - SIMULATED DATA`;
+    const screen = flights.length ? formatAvailabilityScreen(dateStr, origin, dest, flights) : `NO FLIGHTS FOUND FOR CARRIER ${airlineFilter} ON ${origin}-${dest} - SIMULATED DATA`;
     return {
       output: screen,
       updatedPnr: pnr,
@@ -347,15 +338,7 @@ INFO & CONVERSIONS:
     const today = new Date();
     today.setDate(today.getDate() + 7);
     const defaultDate = today.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }).toUpperCase().replace(' ', '');
-    const flights = generateMockAvailability(defaultDate, origin, dest);
-    return {
-      output: formatAvailabilityScreen(defaultDate, origin, dest, flights),
-      updatedPnr: pnr,
-      updatedAvailability: flights,
-      status: 'success',
-      category: 'AVAILABILITY',
-      explanation: `Default 7-day advance availability displayed for ${origin}-${dest}.`,
-    };
+    return executeGdsCommand(`${cmd.slice(0, 2)}${defaultDate}${origin}${dest}`, pnr, lastAvailability);
   }
 
   // 3. SELL SEGMENT (SS)
